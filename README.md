@@ -28,14 +28,57 @@ pytest tests/ -v
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    data[("data/train, data/val, data/test<br/>one folder per class")]
+    ds["ImageFolderDataset<br/>get_clip_transforms or get_vit_transforms:<br/>resize 224, flip and jitter for train,<br/>model-specific normalisation"]
+
+    subgraph model["Backbone + LoRA"]
+        pre["CLIPModel openai/clip-vit-base-patch32<br/>or ViTModel google/vit-base-patch16-224"]
+        peft["get_peft_model with LoraConfig<br/>r, lora_alpha = 2r, dropout 0.1,<br/>bias none, FEATURE_EXTRACTION<br/>target modules q_proj, v_proj<br/>or q_proj, k_proj, v_proj"]
+        feat["CLIP: get_image_features then L2 normalise<br/>ViT: last_hidden_state CLS token"]
+        head["nn.Linear to num_classes<br/>trained together with the adapters"]
+    end
+
+    subgraph loop["train_model — src/train.py"]
+        opt["AdamW on requires_grad params only"]
+        sched["cosine schedule with warmup"]
+        amp["autocast + GradScaler when fp16"]
+        ev["evaluate: top-1 and top-5 from logits.topk"]
+    end
+
+    abl["ablation.py<br/>itertools.product over the grid:<br/>2 model types x 4 ranks x 2 lrs<br/>x 2 target-module sets = 32 runs"]
+    csv[("results CSV sorted by val top-1,<br/>with trainable and total params")]
+
+    data --> ds --> pre --> peft --> feat --> head
+    head --> opt --> sched --> amp --> ev
+    ev --> csv
+    abl --> ds
+    abl --> peft
+    abl --> loop
+    abl --> csv
 ```
-Domain dataset (folder-organized images)
-    → ImageFolderDataset with CLIP/ViT normalization
-    → CLIP / ViT backbone (frozen)
-         + LoRA adapters on Q, V projections
-    → Linear classifier head (num_classes)
-    → Top-1 / Top-5 accuracy
+
+Where the adapters actually sit inside an attention block:
+
+```mermaid
+flowchart LR
+    x["hidden states"]
+    subgraph attn["Self-attention projection"]
+        w["frozen weight W<br/>d x d"]
+        a["LoRA A, d x r<br/>trainable"]
+        b["LoRA B, r x d<br/>trainable"]
+        drop["lora_dropout 0.1"]
+    end
+    add(("+"))
+    y["projected output"]
+
+    x --> w --> add
+    x --> drop --> a --> b -->|"scaled by lora_alpha / r"| add
+    add --> y
 ```
+
+Only the A and B matrices and the classifier head carry `requires_grad=True`; `count_trainable_params` reports that fraction alongside accuracy for every run in the sweep.
 
 ## Tests
 
