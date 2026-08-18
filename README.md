@@ -37,6 +37,38 @@ Domain dataset (folder-organized images)
     → Top-1 / Top-5 accuracy
 ```
 
+## Tests
+
+```bash
+pytest tests/ -v
+```
+
+`tests/test_models.py` covers model construction, LoRA injection, and trainable-parameter count
+assertions. Data layout: `data/<class_name>/*.{jpg,png}` consumed by the
+`ImageFolder`-style loader in `src/dataset.py`; the loader splits 80/20 train/val by default.
+
+## Evaluation
+
+Per-run metrics computed in `src/train.py::evaluate`:
+
+| Metric | How it is computed |
+|--------|--------------------|
+| Top-1 accuracy | `(argmax(logits) == label).mean()` on the val split |
+| Top-5 accuracy | `logits.topk(5).indices` containing the label, mean over val split |
+| Trainable params | Sum of `p.numel()` for parameters with `requires_grad=True` (LoRA A/B + classifier head) |
+
+`src/ablation.py` runs the full grid (rank × model × lr × target modules), writes a sorted
+CSV to `--output_csv`, and prints the top-3 configs by Top-1.
+
+Recommended additional offline metrics on a held-out test split:
+
+- **Per-class precision / recall / F1** via `sklearn.metrics.classification_report`.
+- **Confusion matrix** via `sklearn.metrics.confusion_matrix` to surface class confusions.
+- **Macro AUC** via `roc_auc_score(..., multi_class="ovr")` on softmax probabilities.
+- **Parameter efficiency**: report Top-1 vs. trainable-param fraction across ranks to justify
+  the LoRA rank choice.
+- **Wall-clock training time** per run, logged into the ablation CSV alongside accuracy.
+
 ## Results
 
 LoRA fine-tuning with rank=8 on Q+V projections typically matches full fine-tuning accuracy with <1% trainable parameters, dramatically reducing GPU memory and training time.
